@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>2-Player Split-Screen Drift Racer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a1a;
+      overflow: hidden;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: white;
+    }
+    canvas { display: block; outline: none; }
+    
+    /* Player 1 HUD (Left Side) */
+    #ui-p1 {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.75);
+      padding: 14px 18px;
+      border-radius: 8px;
+      border-left: 4px solid #ff3b30;
+      pointer-events: none;
+    }
+
+    /* Player 2 HUD (Right Side) */
+    #ui-p2 {
+      position: absolute;
+      top: 20px;
+      left: calc(50% + 20px);
+      background: rgba(0, 0, 0, 0.75);
+      padding: 14px 18px;
+      border-radius: 8px;
+      border-left: 4px solid #007aff;
+      pointer-events: none;
+    }
+
+    h1 { font-size: 16px; margin-bottom: 6px; letter-spacing: 1px; }
+    p { font-size: 13px; margin: 3px 0; color: #ddd; }
+
+    .controls-p1 {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(0, 0, 0, 0.65);
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #eee;
+      pointer-events: none;
+    }
+
+    .controls-p2 {
+      position: absolute;
+      bottom: 20px;
+      left: calc(50% + 20px);
+      background: rgba(0, 0, 0, 0.65);
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #eee;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+<div id="ui-p1">
+  <h1>PLAYER 1 (RED)</h1>
+  <p>Lap: <span id="lap1">1</span></p>
+  <p>Time: <span id="time1">0.00</span>s</p>
+  <p>Best: <span id="best1">--</span></p>
+  <p>Speed: <span id="speed1">0</span> MPH</p>
+</div>
+
+<div id="ui-p2">
+  <h1>PLAYER 2 (BLUE)</h1>
+  <p>Lap: <span id="lap2">1</span></p>
+  <p>Time: <span id="time2">0.00</span>s</p>
+  <p>Best: <span id="best2">--</span></p>
+  <p>Speed: <span id="speed2">0</span> MPH</p>
+</div>
+
+<div class="controls-p1">
+  <b>Player 1 Controls:</b> WASD to Drive &amp; Steer &nbsp;|&nbsp; <b>Left Shift:</b> Drift
+</div>
+
+<div class="controls-p2">
+  <b>Player 2 Controls:</b> Arrow Keys to Drive &amp; Steer &nbsp;|&nbsp; <b>Right Shift / Enter:</b> Drift
+</div>
+
+<canvas id="game" tabindex="1"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+canvas.focus();
+
+// Input tracking
+const keys = {};
+window.addEventListener('keydown', e => {
+  if ([
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
+    'KeyW', 'KeyS', 'KeyA', 'KeyD', 'ShiftLeft', 'ShiftRight', 'Enter', 'Space'
+  ].includes(e.code)) {
+    e.preventDefault();
+  }
+  keys[e.code] = true;
+  keys[e.key.toLowerCase()] = true;
+});
+
+window.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  keys[e.key.toLowerCase()] = false;
+});
+
+// Factory function to create each player's car
+function createCar(x, y, color, id) {
+  return {
+    id,
+    x,
+    y,
+    vx: 0,
+    vy: 0,
+    angle: 0,
+    width: 44,
+    height: 22,
+    color,
+    accel: 0.4,
+    maxSpeed: 14,
+    turnSpeed: 0.065,
+    grip: 0.92,
+    friction: 0.985,
+    lap: 1,
+    startTime: Date.now(),
+    bestTime: null,
+    passedCheckpoint: false
+  };
+}
+
+// Spawn cars side-by-side at the starting line
+const p1 = createCar(1000, 425, '#ff3b30', 1);
+const p2 = createCar(1000, 475, '#007aff', 2);
+
+// Track geometry
+const track = {
+  cx: 1000,
+  cy: 1000,
+  rx: 750,
+  ry: 550,
+  roadWidth: 220
+};
+
+const skids = [];
+
+function updateCar(car, controls) {
+  const forwardX = Math.cos(car.angle);
+  const forwardY = Math.sin(car.angle);
+
+  let forwardSpeed = car.vx * forwardX + car.vy * forwardY;
+  let rightX = -forwardY;
+  let rightY = forwardX;
+  let lateralSpeed = car.vx * rightX + car.vy * rightY;
+
+  // Acceleration & Braking
+  if (controls.up) {
+    forwardSpeed += car.accel;
+    if (forwardSpeed > car.maxSpeed) forwardSpeed = car.maxSpeed;
+  }
+  if (controls.down) {
+    forwardSpeed -= car.accel * 0.7;
+    if (forwardSpeed < -car.maxSpeed * 0.4) forwardSpeed = -car.maxSpeed * 0.4;
+  }
+
+  // Steering
+  const totalSpeed = Math.hypot(car.vx, car.vy);
+  const dir = forwardSpeed >= 0 ? 1 : -1;
+  if (controls.left) car.angle -= car.turnSpeed * dir;
+  if (controls.right) car.angle += car.turnSpeed * dir;
+
+  // Drift physics
+  const currentGrip = controls.handbrake ? 0.94 : car.grip;
+  lateralSpeed *= currentGrip;
+
+  car.vx = forwardX * forwardSpeed + rightX * lateralSpeed;
+  car.vy = forwardY * forwardSpeed + rightY * lateralSpeed;
+
+  car.vx *= car.friction;
+  car.vy *= car.friction;
+
+  // Off-road grass slowdown
+  const normDist = Math.hypot((car.x - track.cx) / track.rx, (car.y - track.cy) / track.ry);
+  const innerLimit = 1 - (track.roadWidth / 2) / 650;
+  const outerLimit = 1 + (track.roadWidth / 2) / 650;
+  const offRoad = normDist < innerLimit || normDist > outerLimit;
+
+  if (offRoad) {
+    car.vx *= 0.92;
+    car.vy *= 0.92;
+  }
+
+  car.x += car.vx;
+  car.y += car.vy;
+
+  // Tire skid marks
+  if ((Math.abs(lateralSpeed) > 2.0 || (controls.handbrake && totalSpeed > 2)) && !offRoad) {
+    const rearX = car.x - forwardX * 16;
+    const rearY = car.y - forwardY * 16;
+    skids.push({
+      x1: rearX + rightX * 8, y1: rearY + rightY * 8,
+      x2: rearX - rightX * 8, y2: rearY - rightY * 8
+    });
+    if (skids.length > 600) skids.shift();
+  }
+
+  // Checkpoint & Lap Logic
+  if (car.y > track.cy + 300 && Math.abs(car.x - track.cx) < 150) {
+    car.passedCheckpoint = true;
+  }
+  if (car.passedCheckpoint && car.y < track.cy - 300 && Math.abs(car.x - track.cx) < 80) {
+    car.passedCheckpoint = false;
+    const lapTime = ((Date.now() - car.startTime) / 1000).toFixed(2);
+    if (!car.bestTime || parseFloat(lapTime) < parseFloat(car.bestTime)) {
+      car.bestTime = lapTime;
+      document.getElementById('best' + car.id).innerText = car.bestTime + 's';
+    }
+    car.lap++;
+    car.startTime = Date.now();
+    document.getElementById('lap' + car.id).innerText = car.lap;
+  }
+
+  // Update player's HUD
+  document.getElementById('time' + car.id).innerText = ((Date.now() - car.startTime) / 1000).toFixed(2);
+  document.getElementById('speed' + car.id).innerText = Math.round(totalSpeed * 11);
+}
+
+// Car-to-Car Collision Physics
+function checkCarCollision(c1, c2) {
+  const dx = c2.x - c1.x;
+  const dy = c2.y - c1.y;
+  const dist = Math.hypot(dx, dy);
+  const minDist = 34;
+
+  if (dist < minDist && dist > 0) {
+    const nx = dx / dist;
+    const ny = dy / dist;
+    const overlap = (minDist - dist) / 2;
+
+    // Push cars apart
+    c1.x -= nx * overlap;
+    c1.y -= ny * overlap;
+    c2.x += nx * overlap;
+    c2.y += ny * overlap;
+
+    // Transfer bounce momentum
+    const rvx = c2.vx - c1.vx;
+    const rvy = c2.vy - c1.vy;
+    const velAlongNormal = rvx * nx + rvy * ny;
+
+    if (velAlongNormal < 0) {
+      const bounce = 0.8;
+      const impulse = -(1 + bounce) * velAlongNormal / 2;
+      c1.vx -= impulse * nx;
+      c1.vy -= impulse * ny;
+      c2.vx += impulse * nx;
+      c2.vy += impulse * ny;
+    }
+  }
+}
+
+function update() {
+  // Player 1: WASD + Left Shift
+  updateCar(p1, {
+    up: keys['KeyW'] || keys['w'],
+    down: keys['KeyS'] || keys['s'],
+    left: keys['KeyA'] || keys['a'],
+    right: keys['KeyD'] || keys['d'],
+    handbrake: keys['ShiftLeft']
+  });
+
+  // Player 2: Arrow Keys + Right Shift / Enter
+  updateCar(p2, {
+    up: keys['ArrowUp'],
+    down: keys['ArrowDown'],
+    left: keys['ArrowLeft'],
+    right: keys['ArrowRight'],
+    handbrake: keys['ShiftRight'] || keys['Enter']
+  });
+
+  checkCarCollision(p1, p2);
+}
+
+function drawTrack() {
+  ctx.fillStyle = '#2d5a27';
+  ctx.fillRect(0, 0, 2000, 2000);
+
+  ctx.strokeStyle = '#264d21';
+  ctx.lineWidth = 2;
+  for (let i = 0; i <= 2000; i += 100) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, 2000); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(2000, i); ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.ellipse(track.cx, track.cy, track.rx, track.ry, 0, 0, Math.PI * 2);
+  ctx.lineWidth = track.roadWidth + 24;
+  ctx.strokeStyle = '#d93829';
+  ctx.stroke();
+
+  ctx.setLineDash([30, 30]);
+  ctx.strokeStyle = '#ffffff';
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.ellipse(track.cx, track.cy, track.rx, track.ry, 0, 0, Math.PI * 2);
+  ctx.lineWidth = track.roadWidth;
+  ctx.strokeStyle = '#33363b';
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(track.cx, track.cy, track.rx, track.ry, 0, 0, Math.PI * 2);
+  ctx.lineWidth = 4;
+  ctx.setLineDash([25, 25]);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const finishY = track.cy - track.ry;
+  ctx.fillStyle = '#ffffff';
+  for (let row = 0; row < 2; row++) {
+    for (let col = 0; col < 11; col++) {
+      if ((row + col) % 2 === 0) {
+        ctx.fillRect(track.cx - 10 + row * 10, finishY - 110 + col * 20, 10, 20);
+      }
+    }
+  }
+}
+
+function drawCar(car) {
+  ctx.save();
+  ctx.translate(car.x, car.y);
+  ctx.rotate(car.angle);
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+  ctx.fillRect(-car.width / 2 + 4, -car.height / 2 + 4, car.width, car.height);
+
+  ctx.fillStyle = '#111';
+  ctx.fillRect(-16, -13, 10, 4);
+  ctx.fillRect(8, -13, 10, 4);
+  ctx.fillRect(-16, 9, 10, 4);
+  ctx.fillRect(8, 9, 10, 4);
+
+  ctx.fillStyle = car.color;
+  ctx.beginPath();
+  ctx.roundRect(-car.width / 2, -car.height / 2, car.width, car.height, 5);
+  ctx.fill();
+
+  ctx.fillStyle = '#1c252c';
+  ctx.fillRect(4, -8, 9, 16);
+  ctx.fillRect(-14, -7, 6, 14);
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(-car.width / 2, -2, car.width, 4);
+
+  ctx.fillStyle = '#fff59d';
+  ctx.fillRect(car.width / 2 - 2, -8, 2, 4);
+  ctx.fillRect(car.width / 2 - 2, 4, 2, 4);
+
+  ctx.restore();
+}
+
+function renderViewport(targetCar, viewX, viewWidth) {
+  ctx.save();
+  
+  // Clip rendering strictly to this player's half of the screen
+  ctx.beginPath();
+  ctx.rect(viewX, 0, viewWidth, canvas.height);
+  ctx.clip();
+
+  // Center camera on targetCar within their half of the screen
+  const camX = viewX + viewWidth / 2 - targetCar.x;
+  const camY = canvas.height / 2 - targetCar.y;
+  ctx.translate(camX, camY);
+
+  drawTrack();
+
+  ctx.fillStyle = 'rgba(15, 15, 15, 0.45)';
+  for (let s of skids) {
+    ctx.fillRect(s.x1, s.y1, 4, 4);
+    ctx.fillRect(s.x2, s.y2, 4, 4);
+  }
+
+  drawCar(p1);
+  drawCar(p2);
+
+  ctx.restore();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const halfWidth = canvas.width / 2;
+
+  // Left Screen: Player 1
+  renderViewport(p1, 0, halfWidth);
+
+  // Right Screen: Player 2
+  renderViewport(p2, halfWidth, halfWidth);
+
+  // Center Split-Screen Divider Line
+  ctx.fillStyle = '#111111';
+  ctx.fillRect(halfWidth - 3, 0, 6, canvas.height);
+}
+
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
